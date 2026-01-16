@@ -5,3 +5,4 @@ main/__pycache__/main.cpython-39.pyc
 main/__pycache__/map_class.cpython-39.pyc
 drones_trajectories.csv
 single_coverage.csv
+*.pyc
