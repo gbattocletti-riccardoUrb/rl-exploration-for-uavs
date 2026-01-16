@@ -1,92 +1,131 @@
 import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
-import tensorflow as tf
-from tensorflow.keras import layers
-from tensorflow.keras import initializers
 
-def create_actor(args):
-    # initialize last layer weights between -3e-3 and 3-e3
-    last_init = tf.random_uniform_initializer(minval=-3, maxval=3)
-    # layer_init = tf.keras.initializers.Zeros()
-    # layer_init = initializers.zeros()
+# Actor network
+class Actor(nn.Module):
+    def __init__(self, args):
+        super(Actor, self).__init__()
+        self.args = args
 
-    # define net layers
-    inputs = layers.Input(shape=(args.state_size, args.state_size, 1))
-    out = layers.Conv2D(32, (7, 7), input_shape=(args.state_size, args.state_size, 1), strides=(3, 3), activation="relu", padding='valid')(inputs)
-    #out = layers.MaxPooling2D(pool_size=(3, 3), strides=(1,1), padding='same')(out)
-    out = layers.BatchNormalization()(out)
-    out = layers.Conv2D(32, (5, 5), strides=(3, 3), activation="relu", padding='valid')(out)
-    #out = layers.MaxPooling2D(pool_size=(2, 2), strides=(1, 1), padding='same')(out)
-    out = layers.BatchNormalization()(out)
-    out = layers.Conv2D(64, (3, 3), strides=(2, 2), activation="relu", padding='valid')(out)
-    #out = layers.MaxPooling2D(pool_size=(2, 2), strides=(1, 1), padding='same')(out)
-    out = layers.BatchNormalization()(out)
-    out = layers.Flatten()(out)
-    out = layers.Dropout(.2)(out)
-    # out = layers.Dense(128, activation="relu", kernel_initializer=layer_init)(out)
-    out = layers.Dense(128, activation="relu")(out)
-    out = layers.Dense(64, activation="relu")(out)
-    out = layers.Dense(32, activation="relu")(out)
-    out = layers.Dense(16, activation="relu")(out)
-    out = layers.Dense(8, activation="relu")(out)
-    # out = layers.LayerNormalization()(out)
-    outputs = layers.Dense(1, activation="sigmoid", kernel_initializer=last_init)(out)
+        # Convolutional layers
+        self.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=3)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.conv2 = nn.Conv2d(64, 64, kernel_size=5, stride=3)
+        self.bn2 = nn.BatchNorm2d(64)
+        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=2)
+        self.bn3 = nn.BatchNorm2d(64)
 
-    # rescale output to match action upper and lower bound
-    outputs = outputs * math.radians(args.max_angle)
+        # Fully connected layers
+        self.fc1 = nn.Linear(self._get_conv_output_size(), 128)
+        self.fc2 = nn.Linear(128, 64)
+        self.fc3 = nn.Linear(64, 32)
+        self.fc4 = nn.Linear(32, 16)
+        self.fc5 = nn.Linear(16, 8)
+        self.fc6 = nn.Linear(8, 1)
 
-    # build model
-    model = tf.keras.Model(inputs, outputs)
-    return model
+        # Initialize last layer weights between -3 and 3
+        nn.init.uniform_(self.fc6.weight, -3e-3, 3e-3)
+        nn.init.uniform_(self.fc6.bias, -3e-3, 3e-3)
+
+        self.dropout = nn.Dropout(0.2)
+
+    def _get_conv_output_size(self):
+        # Compute output size of conv layers
+        x = torch.zeros(1, 1, self.args.state_size, self.args.state_size)
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = self.conv3(x)
+        x = self.bn3(x)
+        return int(np.prod(x.size()))
+
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = self.bn1(x)
+        x = F.relu(self.conv2(x))
+        x = self.bn2(x)
+        x = F.relu(self.conv3(x))
+        x = self.bn3(x)
+
+        x = torch.flatten(x, 1)
+        x = self.dropout(x)
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        x = F.relu(self.fc4(x))
+        x = F.relu(self.fc5(x))
+        x = torch.sigmoid(self.fc6(x))
+
+        # Rescale output to match max angle
+        return x * math.radians(self.args.max_angle)
 
 
-def create_critic(args):
-    # state input + part of net that processes state
-    state_input = layers.Input(shape=(args.state_size, args.state_size, 1))
-    out = layers.Conv2D(16, (7, 7), strides=(1,1), input_shape=(args.state_size, args.state_size, 1), activation="relu")(state_input)
-    #out = layers.MaxPooling2D(pool_size=(3, 3), strides=(1,1), padding='same')(out)
-    out = layers.BatchNormalization()(out)
-    out = layers.Conv2D(32, (5, 5), strides=(3, 3), activation="relu")(out)
-    #out = layers.MaxPooling2D(pool_size=(2, 2), strides=(1,1), padding='same')(out)
-    out = layers.BatchNormalization()(out)
-    out = layers.Flatten()(out)
-    # out = layers.Dense(64, activation="relu")(out)
-    state_out = layers.Dense(64, activation="relu")(out)
+# Critic network
+class Critic(nn.Module):
+    def __init__(self, args):
+        super(Critic, self).__init__()
+        self.args = args
 
-    # action input + part of net that processes action
-    action_input = layers.Input(shape=args.num_actions)
-    action_out = layers.Dense(32, activation="relu")(action_input)
-    action_out = layers.Dense(16, activation="relu")(action_out)
-    # action_layer = layers.Dense(16, activation="relu")(action_input)
-    # action_layer = layers.Dense(8, activation="relu")(action_layer)
-    # action_out = layers.Dense(1, activation="relu")(action_layer)
+        # State pathway
+        self.conv1 = nn.Conv2d(1, 16, kernel_size=7, stride=1)
+        self.bn1 = nn.BatchNorm2d(16)
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=5, stride=3)
+        self.bn2 = nn.BatchNorm2d(32)
+        self.flatten = nn.Flatten()
+        self.fc_state = nn.Linear(self._get_conv_output_size(), 64)
 
-    # concatenation of the two inputs
-    concat = layers.Concatenate()([state_out, action_out])
+        # Action pathway
+        self.fc_action1 = nn.Linear(args.num_actions, 32)
+        self.fc_action2 = nn.Linear(32, 16)
 
-    # part of net that processes the concatenated inputs
-    out = layers.Dense(128, activation="relu")(concat)
-    out = layers.Dense(64, activation="relu")(out)
-    out = layers.Dense(32, activation="relu")(out)
-    outputs = layers.Dense(1)(out)
+        # Combined pathway
+        self.fc1 = nn.Linear(64 + 16, 128)
+        self.fc2 = nn.Linear(128, 64)
+        self.fc3 = nn.Linear(64, 32)
+        self.fc4 = nn.Linear(32, 1)
 
-    # build model - output is a single Q-value for give state-action couple
-    model = tf.keras.Model([state_input, action_input], outputs)
-    return model
+    def _get_conv_output_size(self):
+        x = torch.zeros(1, 1, self.args.state_size, self.args.state_size)
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.conv2(x)
+        x = self.bn2(x)
+        return int(np.prod(x.size()))
 
+    def forward(self, state, action):
+        xs = F.relu(self.conv1(state))
+        xs = self.bn1(xs)
+        xs = F.relu(self.conv2(xs))
+        xs = self.bn2(xs)
+        xs = self.flatten(xs)
+        xs = F.relu(self.fc_state(xs))
+
+        xa = F.relu(self.fc_action1(action))
+        xa = F.relu(self.fc_action2(xa))
+
+        x = torch.cat([xs, xa], dim=1)
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        return self.fc4(x)
+
+
+# Policy function
 def policy(actor_model, state, noise_object, args):
-    sampled_actions = tf.squeeze(actor_model(state))
+    actor_model.eval()
+    with torch.no_grad():
+        sampled_actions = actor_model(state).squeeze(1).cpu().numpy()
     noise = noise_object()
-
-    # adding noise to action (for exploration)
-    sampled_actions = sampled_actions.numpy() + noise
-
-    # make sure action is within bounds (due to noise presence)
+    sampled_actions = sampled_actions + noise
     legal_action = np.clip(sampled_actions, math.radians(args.min_angle), math.radians(args.max_angle))
     return [np.squeeze(legal_action)]
 
-# smoothed target update - this update target parameters slowly, based on rate `tau`, which is much less than one
-@tf.function
-def update_target(target_weights, weights, smoothing_factor_tau):
-    for (target, net) in zip(target_weights, weights):
-        target.assign(net * smoothing_factor_tau + target * (1 - smoothing_factor_tau))
+
+# Target update (soft update)
+def update_target(target_net, source_net, tau):
+    for target_param, param in zip(target_net.parameters(), source_net.parameters()):
+        target_param.data.copy_(param.data * tau + target_param.data * (1.0 - tau))

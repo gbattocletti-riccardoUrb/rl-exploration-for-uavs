@@ -3,14 +3,25 @@ import os
 # os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 # os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 # os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+import argparse
+import os
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
 
 from environment import Environment
 from noise_class import *
 from buffer_class import *
 from agent_functions import *
 
-import tensorflow as tf
+import time
+
+# import tensorflow as tf
 import wandb
+
+# Device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # physical_devices = tf.config.list_physical_devices('GPU')
 # tf.config.experimental.set_memory_growth(physical_devices[0], False)
@@ -115,17 +126,25 @@ print("Min Value of Action ->  {}".format(args.min_angle))
 ou_noise = OUActionNoise(np.zeros(1), args.std_dev * np.ones(1))
 
 # create agent nets
-actor_model = create_actor(args)
-critic_model = create_critic(args)
-target_actor = create_actor(args)
-target_critic = create_critic(args)
+actor_model = Actor(args).to(device)
+critic_model = Critic(args).to(device)
+target_actor = Actor(args).to(device)
+target_critic = Critic(args).to(device)
 
-# initialize weights (initialized with same values for net and target couples)
-target_actor.set_weights(actor_model.get_weights())
-target_critic.set_weights(critic_model.get_weights())
+# # initialize weights (initialized with same values for net and target couples)
+# target_actor.set_weights(actor_model.get_weights())
+# target_critic.set_weights(critic_model.get_weights())
+
+# Initialize target networks
+target_actor.load_state_dict(actor_model.state_dict())
+target_critic.load_state_dict(critic_model.state_dict())
+
+# Optimizers
+actor_optimizer = optim.Adam(actor_model.parameters(), lr=args.actor_lr)
+critic_optimizer = optim.Adam(critic_model.parameters(), lr=args.critic_lr)
 
 # initialize buffer
-buffer = Buffer(args)
+buffer = Buffer(args, device)
 ep_reward_list = []                                 # To store reward history of each episode
 avg_reward_list = []                                # To store average reward history of last few episodes
 reward_data_matrix = np.empty([args.episode_steps, args.episode_number])
@@ -136,19 +155,25 @@ for ep in range(1, args.episode_number):
     state = env.reset()
     episode_reward = 0
     step = 0
+    time_start_episode = time.time()
 
     while True:
-        tf_prev_state = tf.expand_dims(tf.convert_to_tensor(state), 0)
-        action = policy(actor_model, tf_prev_state, ou_noise, args)[0]
+        time_start = time.time()
+        # tf_prev_state = tf.expand_dims(tf.convert_to_tensor(state), 0)
+        state_tensor = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+        action = policy(actor_model, state_tensor, ou_noise, args)[0]
         next_state, reward, done, info = env.step(action)                        # receive state and reward from environment
+
         episode_reward += reward
         buffer.record((state, action, reward, next_state))
-        buffer.learn(actor_model, critic_model, target_actor, target_critic, args)
-        update_target(target_actor.variables, actor_model.variables, args.tau)
-        update_target(target_critic.variables, critic_model.variables, args.tau)
+        buffer.learn(actor_model, critic_model, target_actor, target_critic, actor_optimizer, critic_optimizer, args)
+        update_target(target_actor, actor_model, args.tau)
+        update_target(target_critic, critic_model, args.tau)
         state = next_state
         reward_data_matrix[step, ep] = reward
         step += 1
+        time_end = time.time()
+        print("Step {} | Reward = {} | Time per step = {} s".format (step, np.round(reward, 2), np.round(time_end - time_start, 4)))
         if done:                                                                  # end this episode when `done` is True
             break
     # end while
@@ -156,6 +181,8 @@ for ep in range(1, args.episode_number):
     ep_reward_list.append(episode_reward)
     avg_reward = np.mean(ep_reward_list[-args.average_window:])                  # the average reward is the mean of the last 10 episodes
     avg_reward_list.append(avg_reward)
+    time_end_episode = time.time()
+    print("Time for episode {}: {} s".format(ep, np.round(time_end_episode - time_start_episode, 2)))
     print("Episode {} | Episode Reward = {} | Average Reward = {} | Episode steps = {} | Total steps = {} | Map N° {}".format(ep, np.round(episode_reward, 2), np.round(avg_reward, 2), env.step_number, env.total_steps, env.map_counter))
     # wandb.log({'Reward': episode_reward, 'Average Reward': avg_reward, 'Episode Steps': env.step_number})
     if ep % args.save_figure_period == 0:
@@ -169,5 +196,8 @@ for ep in range(1, args.episode_number):
 np.savetxt('training_' + str(args.model_number) + '.csv', reward_data_matrix, fmt='%0.4f', delimiter=",")
 actor_model.save(actor_name + '_final')
 critic_model.save(critic_name + '_final')
+# Save final models
+torch.save(actor_model.state_dict(), actor_name.replace('.pt', '_final.pt'))
+torch.save(critic_model.state_dict(), critic_name.replace('.pt', '_final.pt'))
 print(actor_model.summary(0))
 print(critic_model.summary(0))
